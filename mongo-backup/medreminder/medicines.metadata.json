@@ -1,0 +1,1 @@
+{"indexes":[{"v":{"$numberInt":"2"},"key":{"_id":{"$numberInt":"1"}},"name":"_id_","collation":{"locale":"simple"}},{"v":{"$numberInt":"2"},"key":{"user":{"$numberInt":"1"}},"name":"user_1","background":true,"collation":{"locale":"simple"}}],"uuid":"5d42c3cac35a48a09bd73558c00645c7","collectionName":"medicines","type":"collection"}
