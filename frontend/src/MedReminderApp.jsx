@@ -16,9 +16,18 @@ import {
 const STORAGE_KEY = 'medreminder_token';
 const REMINDERS_KEY = 'medreminder_reminders_enabled';
 const SOUND_KEY = 'medreminder_reminder_sound';
+
+const rawApiUrl = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || '';
+const baseApiUrl = rawApiUrl.endsWith('/api')
+  ? rawApiUrl
+  : rawApiUrl
+    ? `${rawApiUrl.replace(/\/$/, '')}/api`
+    : '/api';
+
 const API = axios.create({
-  baseURL: `${import.meta.env.VITE_API_URL}/api`,
+  baseURL: baseApiUrl,
 });
+
 const FREQUENCY_OPTIONS = ['Once daily', 'Every day', 'Twice daily', 'Three times daily', 'Specific times', 'Weekly'];
 const TIMES_BY_FREQUENCY = { 'Once daily': 1, 'Every day': 1, 'Twice daily': 2, 'Three times daily': 3 };
 const DEFAULT_TIMES_BY_FREQUENCY = { 1: ['08:00'], 2: ['08:00', '20:00'], 3: ['08:00', '14:00', '20:00'] };
@@ -190,6 +199,18 @@ function App() {
   const alarmAudioRef = useRef(null);
   const alarmIntervalRef = useRef(null);
 
+  const speak = (message) => {
+    if (!voiceGuidance || !('speechSynthesis' in window)) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(message);
+      utterance.rate = 0.9;
+      window.speechSynthesis.speak(utterance);
+    } catch (e) {
+      console.warn('Speech synthesis failed:', e);
+    }
+  };
+
   const loadProtectedData = async () => {
     if (!token) {
       setUser(null);
@@ -199,14 +220,20 @@ function App() {
     }
     try {
       const [userResponse, medicinesResponse, historyResponse] = await Promise.all([
-        apiRequest('get', '/auth/me'), apiRequest('get', '/medicines'), apiRequest('get', '/history'),
+        apiRequest('get', '/auth/me'),
+        apiRequest('get', '/medicines'),
+        apiRequest('get', '/history'),
       ]);
       setUser(userResponse.data.user);
       setMedicines(medicinesResponse.data.medicines || []);
       setHistory(historyResponse.data.history || []);
       if (userResponse.data.user.role === 'caregiver') {
-        const patientResponse = await apiRequest('get', '/caregiver/patients');
-        setPatients(patientResponse.data.seniors || []);
+        try {
+          const patientResponse = await apiRequest('get', '/caregiver/patients');
+          setPatients(patientResponse.data.seniors || []);
+        } catch (patientErr) {
+          console.warn('Unable to load senior profiles:', patientErr);
+        }
       } else {
         setPatients([]);
       }
@@ -214,6 +241,7 @@ function App() {
     } catch (requestError) {
       if (requestError.response?.status === 401) {
         logout();
+        setError('Your session has expired. Please sign in again.');
         return;
       }
       console.error('Unable to load protected care-plan data:', {
@@ -221,11 +249,16 @@ function App() {
         message: requestError.message,
         responseMessage: requestError.response?.data?.message,
       });
-      setError(requestError.response?.data?.message || 'Unable to load your care plan.');
+      const fallbackMsg = requestError.code === 'ERR_NETWORK' || !requestError.response
+        ? 'Unable to connect to the server. Please check your connection.'
+        : requestError.response?.data?.message || 'Unable to load your care plan. Please try again.';
+      setError(fallbackMsg);
     }
   };
 
-  useEffect(() => { if (token) loadProtectedData(); }, [token]);
+  useEffect(() => {
+    if (token) loadProtectedData();
+  }, [token]);
 
   useEffect(() => {
     if (localStorage.getItem(STORAGE_KEY)) return;
@@ -307,14 +340,6 @@ function App() {
         } catch (error) { /* no-op */ }
         gain.disconnect();
       }, Math.max(150, Number(alarmDuration || 8) * 1000));
-    };
-
-    const speak = (message) => {
-      if (!voiceGuidance || !('speechSynthesis' in window)) return;
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(message);
-      utterance.rate = 0.9;
-      window.speechSynthesis.speak(utterance);
     };
 
     if (context.state === 'suspended') {
@@ -600,9 +625,16 @@ function App() {
   const editMedicine = (medicine) => {
     setEditingMedicine(medicine);
     setMedicineForm({
-      name: medicine.name || '', dosage: medicine.dosage || '', frequency: medicine.frequency || 'Once daily',
-      scheduledTimes: getMedicineTimes(medicine), scheduleDays: medicine.scheduleDays || [], startDate: getCalendarDateKey(medicine.startDate), endDate: getCalendarDateKey(medicine.endDate),
-      quantity: medicine.quantity ?? 0, instructions: medicine.instructions || '', active: medicine.active !== false,
+      name: medicine.name || '',
+      dosage: medicine.dosage || '',
+      frequency: medicine.frequency || 'Once daily',
+      scheduledTimes: getMedicineTimes(medicine),
+      scheduleDays: medicine.scheduleDays || [],
+      startDate: getCalendarDateKey(medicine.startDate),
+      endDate: getCalendarDateKey(medicine.endDate),
+      quantity: medicine.quantity ?? 0,
+      instructions: medicine.instructions || '',
+      active: medicine.active !== false,
     });
     setMedicineDialogOpen(true);
   };
@@ -619,10 +651,14 @@ function App() {
       return;
     }
     const payload = {
-      ...medicineForm, scheduledTimes, scheduleTime: scheduledTimes[0], time: scheduledTimes[0],
+      ...medicineForm,
+      scheduledTimes,
+      scheduleTime: scheduledTimes[0],
+      time: scheduledTimes[0],
       quantity: Number(medicineForm.quantity || 0),
       remainingQuantity: editingMedicine?.remainingQuantity ?? Number(medicineForm.quantity || 0),
-      startDate: medicineForm.startDate || null, endDate: medicineForm.endDate || null,
+      startDate: medicineForm.startDate || null,
+      endDate: medicineForm.endDate || null,
     };
     try {
       if (editingMedicine) {
@@ -638,7 +674,9 @@ function App() {
       await loadProtectedData();
     } catch (requestError) {
       setError(requestError.response?.data?.message || 'Unable to save this medicine.');
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const deleteMedicine = async (medicine) => {
@@ -649,6 +687,33 @@ function App() {
       await loadProtectedData();
     } catch (requestError) {
       setError(requestError.response?.data?.message || 'Unable to remove this medicine.');
+    }
+  };
+
+  const snoozeDose = async (dose, minutes) => {
+    const key = `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`;
+    setPendingDose(key);
+    setError('');
+    try {
+      const response = await apiRequest('post', `/medicines/${dose.medicine._id}/snooze`, {
+        minutes,
+        scheduledDate: dose.dateKey,
+        scheduledTime: dose.scheduledTime,
+        timezoneOffset: new Date().getTimezoneOffset(),
+      });
+      const updated = response.data.history;
+      setHistory((current) => [
+        ...current.filter((entry) => !(entry.medicine === updated.medicine && (entry.scheduledDate || getCalendarDateKey(entry.doseDate)) === dose.dateKey && entry.scheduledTime === dose.scheduledTime)),
+        updated,
+      ]);
+      notifiedDoseKeys.current.delete(key);
+      localStorage.setItem('medreminder_notified_doses', JSON.stringify([...notifiedDoseKeys.current]));
+      dismissReminder();
+      setSuccess(`${dose.medicine.name} snoozed for ${minutes} minutes.`);
+    } catch (requestError) {
+      setError(requestError.response?.data?.message || 'Unable to snooze this dose.');
+    } finally {
+      setPendingDose('');
     }
   };
 
@@ -669,41 +734,23 @@ function App() {
       setMedicines((current) => current.map((medicine) => medicine._id === currentMedicine._id ? optimistic : medicine));
     }
     const localHistory = {
-      ...existing, medicine: dose.medicine._id, medicineName: dose.medicine.name, dosage: dose.medicine.dosage,
-      scheduledTime: dose.scheduledTime, scheduledDate: dose.dateKey, doseDate: `${dose.dateKey}T00:00:00.000Z`,
-      actionTime: new Date().toISOString(), takenAt: status === 'TAKEN' ? new Date().toISOString() : null, status,
+      ...existing,
+      medicine: dose.medicine._id,
+      medicineName: dose.medicine.name,
+      dosage: dose.medicine.dosage,
+      scheduledTime: dose.scheduledTime,
+      scheduledDate: dose.dateKey,
+      doseDate: `${dose.dateKey}T00:00:00.000Z`,
+      actionTime: new Date().toISOString(),
+      takenAt: status === 'TAKEN' ? new Date().toISOString() : null,
+      status,
     };
 
-    const snoozeDose = async (dose, minutes) => {
-      const key = `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`;
-      setPendingDose(key);
-      setError('');
-      try {
-        const response = await apiRequest('post', `/medicines/${dose.medicine._id}/snooze`, {
-          minutes,
-          scheduledDate: dose.dateKey,
-          scheduledTime: dose.scheduledTime,
-          timezoneOffset: new Date().getTimezoneOffset(),
-        });
-        const updated = response.data.history;
-        setHistory((current) => [
-          ...current.filter((entry) => !(entry.medicine === updated.medicine && entry.scheduledDate === updated.scheduledDate && entry.scheduledTime === updated.scheduledTime)),
-          updated,
-        ]);
-        notifiedDoseKeys.current.delete(key);
-        localStorage.setItem('medreminder_notified_doses', JSON.stringify([...notifiedDoseKeys.current]));
-        dismissReminder();
-        setSuccess(`${dose.medicine.name} snoozed for ${minutes} minutes.`);
-      } catch (requestError) {
-        setError(requestError.response?.data?.message || 'Unable to snooze this dose.');
-      } finally {
-        setPendingDose('');
-      }
-    };
     setHistory((current) => [
       ...current.filter((entry) => !(entry.medicine === dose.medicine._id && (entry.scheduledDate || getCalendarDateKey(entry.doseDate)) === dose.dateKey && entry.scheduledTime === dose.scheduledTime)),
       localHistory,
     ]);
+
     try {
       const response = await apiRequest('post', `/medicines/${dose.medicine._id}/status`, {
         status,
@@ -951,12 +998,50 @@ function App() {
 
   const renderDoseRow = (dose, showActions = true) => (
     <article className={`dose-row dose-${dose.status.toLowerCase()}`} key={`${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`}>
-      <span className="dose-icon" aria-hidden="true">✳</span><div className="dose-time">{formatTime(dose.scheduledDateTime)}</div>
-      <div className="dose-detail"><strong>{dose.medicine.name}</strong><span>{dose.medicine.dosage || 'Dose not specified'}</span></div>
+      <span className="dose-icon" aria-hidden="true">✳</span>
+      <div className="dose-time">{formatTime(dose.scheduledDateTime)}</div>
+      <div className="dose-detail">
+        <strong>{dose.medicine.name}</strong>
+        <span>{dose.medicine.dosage || 'Dose not specified'}</span>
+      </div>
       <span className={`status-pill status-${dose.status.toLowerCase()}`}>{getStatusLabel(dose.status)}</span>
-      {dose.status === 'PENDING' && showActions && dose.timingStatus !== 'UPCOMING' && <div className="dose-actions">{(dose.timingStatus === 'MISSED' ? ['TAKEN', 'SKIPPED', 'MISSED'] : ['TAKEN', 'SKIPPED']).map((status) => <button type="button" key={status} className={`dose-action action-${status.toLowerCase()}`} disabled={pendingDose === `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`} aria-label={`${getStatusLabel(status)} ${dose.medicine.name} at ${formatTime(dose.scheduledDateTime)}`} onClick={() => markDoseStatus(dose, status)}>{status === 'TAKEN' ? '✓ Taken' : status === 'SKIPPED' ? '↪ Skip' : '⚠ Missed'}</button>)}</div>}
+      {dose.status === 'PENDING' && showActions && (
+        <div className="dose-actions">
+          <button
+            type="button"
+            className="dose-action action-taken"
+            disabled={pendingDose === `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`}
+            aria-label={`Mark ${dose.medicine.name} taken`}
+            onClick={() => markDoseStatus(dose, 'TAKEN')}
+          >
+            ✓ Taken
+          </button>
+          <button
+            type="button"
+            className="dose-action action-skipped"
+            disabled={pendingDose === `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`}
+            aria-label={`Skip ${dose.medicine.name}`}
+            onClick={() => markDoseStatus(dose, 'SKIPPED')}
+          >
+            ↪ Skip
+          </button>
+          {dose.timingStatus === 'MISSED' && (
+            <button
+              type="button"
+              className="dose-action action-missed"
+              disabled={pendingDose === `${dose.medicine._id}|${dose.dateKey}|${dose.scheduledTime}`}
+              aria-label={`Mark ${dose.medicine.name} missed`}
+              onClick={() => markDoseStatus(dose, 'MISSED')}
+            >
+              ⚠ Missed
+            </button>
+          )}
+        </div>
+      )}
       {dose.status === 'SNOOZED' && <span className="dose-action-time">Reminder again at {formatTime(dose.snoozeUntil)}</span>}
-      {dose.status !== 'PENDING' && ['TAKEN', 'SKIPPED', 'MISSED'].includes(dose.status) && (dose.historyEntry?.actionTime || dose.historyEntry?.takenAt) && <span className="dose-action-time">{getStatusLabel(dose.status)} at {formatTime(new Date(dose.historyEntry.actionTime || dose.historyEntry.takenAt))}</span>}
+      {dose.status !== 'PENDING' && ['TAKEN', 'SKIPPED', 'MISSED'].includes(dose.status) && (dose.historyEntry?.actionTime || dose.historyEntry?.takenAt) && (
+        <span className="dose-action-time">{getStatusLabel(dose.status)} at {formatTime(new Date(dose.historyEntry.actionTime || dose.historyEntry.takenAt))}</span>
+      )}
     </article>
   );
 
@@ -988,7 +1073,7 @@ function App() {
 
         {page === 'My medicines' && <section className="page-section"><div className="page-title-row"><div><span className="eyebrow">YOUR CARE PLAN</span><h1>{selectedPatient && user?.role === 'caregiver' ? `${selectedPatient.name}’s medicines` : 'My medicines'}</h1><p>Keep your medicines and schedules in one place.</p></div><div className="medicine-card-actions">{selectedPatient && user?.role === 'caregiver' && <button className="button button-quiet" type="button" onClick={stopManagingPatient}>Back to patients</button>}{user?.role !== 'senior' && <><button className="button button-quiet" type="button" onClick={startVoiceMedicineEntry}>🎤 Speak to add</button><button className="button button-quiet" type="button" onClick={() => setError('Photo scanning is not configured. No OCR provider is connected, so nothing was extracted or saved.')}>📷 Scan medicine</button><button className="button button-primary" type="button" onClick={openNewMedicine}><span aria-hidden="true">+</span> Add medicine</button></>}</div></div>{voiceUnavailable && <p className="toast toast-error" role="status">Voice recognition is not supported in this browser. You can still add medicine details manually.</p>}{medicines.length ? <div className="medicine-grid">{medicines.map((medicine) => <article className="medicine-card" key={medicine._id}><div className="medicine-card-top"><span className="medicine-symbol" aria-hidden="true">✳</span><span className={`status-pill ${medicine.active ? 'status-taken' : 'status-inactive'}`}>{medicine.active ? 'Active' : 'Inactive'}</span></div><h2>{medicine.name}</h2><p className="medicine-dosage">{medicine.dosage || 'Dose not specified'} · {medicine.frequency || 'Daily'}</p><dl className="medicine-facts"><div><dt>Schedule</dt><dd>{getMedicineTimes(medicine).map((time) => formatTime(createScheduledDateTime(todayKey, time))).join(' · ')}</dd></div><div><dt>Start date</dt><dd>{medicine.startDate ? formatDate(dateFromKey(getCalendarDateKey(medicine.startDate)), { month: 'short', day: 'numeric', year: 'numeric' }) : 'Ongoing'}</dd></div><div><dt>End date</dt><dd>{medicine.endDate ? formatDate(dateFromKey(getCalendarDateKey(medicine.endDate)), { month: 'short', day: 'numeric', year: 'numeric' }) : 'No end date'}</dd></div><div><dt>Quantity left</dt><dd>{medicine.remainingQuantity ?? medicine.quantity ?? 0}</dd></div></dl><p className="medicine-instructions">{medicine.instructions || 'No instructions added.'}</p><div className="medicine-card-actions">{user?.role !== 'senior' && <><button className="button button-quiet" type="button" onClick={() => editMedicine(medicine)}>Edit</button><button className="button button-danger-quiet" type="button" onClick={() => deleteMedicine(medicine)}>Delete</button></>}</div></article>)}</div> : <div className="empty-state page-empty"><span className="empty-mark">+</span><strong>No medicines scheduled yet.</strong><p>{user?.role === 'senior' ? 'Ask your caregiver to add a medicine.' : 'Add your first medicine and its daily schedule.'}</p>{user?.role !== 'senior' && <button className="button button-primary" type="button" onClick={openNewMedicine}>Add medicine</button>}</div>}</section>}
 
-        {page === 'Patients' && <section className="page-section"><div className="page-title-row"><div><span className="eyebrow">CAREGIVER</span><h1>Patients</h1><p>Create a senior profile and keep an eye on their medicine routine.</p></div></div><section className="settings-section"><div className="settings-section-heading"><div><h2>Add a senior profile</h2><p>Set a private PIN. It is hashed before storage.</p></div></div><form className="medicine-form" onSubmit={createSenior}><div className="form-columns"><label className="form-field">Senior name<input value={patientForm.name} onChange={(event) => setPatientForm((current) => ({ ...current, name: event.target.value }))} required /></label><label className="form-field">Senior email<input type="email" value={patientForm.email} onChange={(event) => setPatientForm((current) => ({ ...current, email: event.target.value }))} required /></label></div><div className="form-columns"><label className="form-field">Phone (optional)<input value={patientForm.phone} onChange={(event) => setPatientForm((current) => ({ ...current, phone: event.target.value }))} /></label><label className="form-field">4–6 digit PIN<input type="password" inputMode="numeric" maxLength="6" value={patientForm.pin} onChange={(event) => setPatientForm((current) => ({ ...current, pin: event.target.value.replace(/\\D/g, '').slice(0, 6) }))} required /></label></div><button className="button button-primary" type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create senior profile'}</button></form></section><div className="section-heading"><h2>Your seniors</h2></div>{patients.length ? <div className="medicine-grid">{patients.map((patient) => <article className="medicine-card" key={patient._id}><div className="medicine-card-top"><span className="medicine-symbol" aria-hidden="true">👵</span><span className="status-pill status-taken">Active</span></div><h2>{patient.name}</h2><p className="medicine-dosage">{patient.email}</p><div className="medicine-card-actions"><button className="button button-primary" type="button" onClick={() => openPatientDashboard(patient)}>Monitor</button><button className="button button-quiet" type="button" onClick={() => managePatientMedicines(patient)}>Manage medicines</button></div></article>)}</div> : <div className="empty-state"><strong>No senior profiles yet.</strong><p>Create a profile above to manage medicine schedules and monitor adherence.</p></div>}</section>}
+        {page === 'Patients' && <section className="page-section"><div className="page-title-row"><div><span className="eyebrow">CAREGIVER</span><h1>Patients</h1><p>Create a senior profile and keep an eye on their medicine routine.</p></div></div><section className="settings-section"><div className="settings-section-heading"><div><h2>Add a senior profile</h2><p>Set a private PIN. It is hashed before storage.</p></div></div><form className="medicine-form" onSubmit={createSenior}><div className="form-columns"><label className="form-field">Senior name<input value={patientForm.name} onChange={(event) => setPatientForm((current) => ({ ...current, name: event.target.value }))} required /></label><label className="form-field">Senior email<input type="email" value={patientForm.email} onChange={(event) => setPatientForm((current) => ({ ...current, email: event.target.value }))} required /></label></div><div className="form-columns"><label className="form-field">Phone (optional)<input value={patientForm.phone} onChange={(event) => setPatientForm((current) => ({ ...current, phone: event.target.value }))} /></label><label className="form-field">4–6 digit PIN<input type="password" inputMode="numeric" maxLength="6" value={patientForm.pin} onChange={(event) => setPatientForm((current) => ({ ...current, pin: event.target.value.replace(/\D/g, '').slice(0, 6) }))} required /></label></div><button className="button button-primary" type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create senior profile'}</button></form></section><div className="section-heading"><h2>Your seniors</h2></div>{patients.length ? <div className="medicine-grid">{patients.map((patient) => <article className="medicine-card" key={patient._id}><div className="medicine-card-top"><span className="medicine-symbol" aria-hidden="true">👵</span><span className="status-pill status-taken">Active</span></div><h2>{patient.name}</h2><p className="medicine-dosage">{patient.email}</p><div className="medicine-card-actions"><button className="button button-primary" type="button" onClick={() => openPatientDashboard(patient)}>Monitor</button><button className="button button-quiet" type="button" onClick={() => managePatientMedicines(patient)}>Manage medicines</button></div></article>)}</div> : <div className="empty-state"><strong>No senior profiles yet.</strong><p>Create a profile above to manage medicine schedules and monitor adherence.</p></div>}</section>}
 
         {page === 'Patient dashboard' && <section className="page-section"><div className="page-title-row"><div><span className="eyebrow">CAREGIVER MONITORING</span><h1>{patientDashboard?.senior?.name || selectedPatient?.name || 'Patient dashboard'}</h1><p>Today’s doses, adherence, stock and recent dose history.</p></div><div className="medicine-card-actions"><button type="button" className="button button-quiet" onClick={() => setPage('Patients')}>Back to patients</button><button type="button" className="button button-quiet" onClick={resetPatientPin}>Reset senior PIN</button></div></div>{loading && !patientDashboard ? <p role="status">Loading patient dashboard…</p> : patientDashboard && <><section className="summary-grid"><article className="summary-card summary-total"><span>Today’s adherence</span><strong>{patientDashboard.adherence}%</strong></article><article className="summary-card"><span>Taken</span><strong>{patientDashboard.counts.taken}</strong></article><article className="summary-card"><span>Skipped</span><strong>{patientDashboard.counts.skipped}</strong></article><article className="summary-card"><span>Missed</span><strong>{patientDashboard.counts.missed}</strong></article><article className="summary-card"><span>Upcoming</span><strong>{patientDashboard.counts.upcoming}</strong></article></section><div className="adherence-track"><span style={{ width: `${patientDashboard.adherence}%` }} /></div><section className="content-section today-section"><div className="section-heading"><h2>Today’s doses</h2><button className="text-button" type="button" onClick={() => openPatientDashboard(selectedPatient)}>Refresh</button></div>{patientDashboard.doses.length ? <div className="dose-list">{patientDashboard.doses.map((dose) => <article className={`dose-row dose-${dose.status.toLowerCase()}`} key={dose._id}><span className="dose-icon" aria-hidden="true">💊</span><div className="dose-time">{dose.scheduledTime}</div><div className="dose-detail"><strong>{dose.medicineName}</strong><span>{dose.dosage}</span></div><span className={`status-pill status-${dose.status.toLowerCase()}`}>{getStatusLabel(dose.status)}</span></article>)}</div> : <p>No doses scheduled today.</p>}</section>{patientDashboard.lowStock.length > 0 && <section className="settings-section"><h2>Low stock</h2>{patientDashboard.lowStock.map((medicine) => <p key={medicine._id}>⚠ {medicine.name}: {medicine.remainingQuantity} remaining</p>)}</section>}<section className="settings-section"><h2>Missed-dose alerts</h2>{patientDashboard.doses.filter((dose) => dose.status === 'MISSED').length ? patientDashboard.doses.filter((dose) => dose.status === 'MISSED').map((dose) => <p key={dose._id}>⚠ Missed {dose.medicineName} at {dose.scheduledTime}</p>) : <p>No missed doses today.</p>}</section></>}</section>}
 

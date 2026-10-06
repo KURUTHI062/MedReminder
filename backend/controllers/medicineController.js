@@ -72,7 +72,7 @@ exports.getMedicines = async (req, res) => {
     const medicines = await Medicine.find({ user: req.user._id }).sort({ createdAt: -1 });
     return res.json({ success: true, medicines });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: error.message || 'Unable to retrieve medicines' });
   }
 };
 
@@ -92,7 +92,7 @@ exports.createMedicine = async (req, res) => {
     active,
   } = req.body;
 
-  if (!name) {
+  if (!name || !String(name).trim()) {
     return res.status(400).json({ message: 'Medicine name is required' });
   }
 
@@ -108,7 +108,7 @@ exports.createMedicine = async (req, res) => {
     }
     const medicine = await Medicine.create({
       user: req.user._id,
-      name,
+      name: String(name).trim(),
       dosage: dosage || '',
       frequency: frequency || '',
       scheduledTimes: times,
@@ -227,10 +227,13 @@ exports.deleteMedicine = async (req, res) => {
       return res.status(404).json({ message: 'Medicine not found' });
     }
 
+    // Clean up pending doses for the deleted medicine to avoid orphan pending records
+    await History.deleteMany({ user: req.user._id, medicine: medicine._id, status: 'PENDING' });
     await medicine.deleteOne();
+
     return res.json({ success: true, message: 'Medicine deleted successfully' });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: error.message || 'Unable to delete medicine' });
   }
 };
 
@@ -266,11 +269,9 @@ exports.markMedicineStatus = async (req, res) => {
     }
     const { scheduledTime, scheduledDate, doseDate, legacyDoseDate } = doseDetails;
     const scheduledDateTime = getScheduledDateTime(scheduledDate, scheduledTime, timezoneOffset);
-    if (now < scheduledDateTime) {
-      return res.status(400).json({ message: 'This dose cannot be updated before its scheduled time.' });
-    }
-    if (status === 'MISSED'
-      && now < scheduledDateTime.getTime() + getMissedGraceMinutes() * 60000) {
+
+    // Only MISSED requires grace period to have passed; TAKEN and SKIPPED are allowed for today's scheduled doses
+    if (status === 'MISSED' && now < scheduledDateTime.getTime() + getMissedGraceMinutes() * 60000) {
       return res.status(400).json({ message: 'This dose cannot be marked missed until its grace period has ended.' });
     }
 
@@ -321,7 +322,7 @@ exports.markMedicineStatus = async (req, res) => {
           _id: existingHistory._id,
           $or: [
             { status: 'PENDING' },
-            { status: 'SNOOZED', snoozeUntil: { $lte: now } },
+            { status: 'SNOOZED' },
           ],
         },
         { $set: updateFields },
@@ -362,7 +363,7 @@ exports.markMedicineStatus = async (req, res) => {
     });
   } catch (error) {
     console.error('Medicine status update failed:', error);
-    return res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: error.message || 'Unable to update dose status' });
   }
 };
 
@@ -389,9 +390,6 @@ exports.snoozeMedicineDose = async (req, res) => {
       req.body.scheduledTime,
       requestedDate
     );
-    if (now < getScheduledDateTime(scheduledDate, scheduledTime, timezoneOffset)) {
-      return res.status(400).json({ message: 'This dose cannot be snoozed before its scheduled time.' });
-    }
 
     let history = await History.findOne({ user: req.user._id, medicine: medicine._id, scheduledDate, scheduledTime })
       || await History.findOne({ user: req.user._id, medicine: medicine._id, scheduledTime, doseDate: legacyDoseDate });
