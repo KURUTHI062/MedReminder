@@ -13,17 +13,30 @@ const migrateLegacyTrustedDevices = require('./services/trustedDeviceMigration')
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
-const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173').split(',').map((origin) => origin.trim()).filter(Boolean);
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://med-reminder-gh8a.vercel.app',
+  ...(process.env.CORS_ORIGIN || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+];
 
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow requests without an Origin header
+      // and requests from approved frontend URLs.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
+
+      console.log('CORS blocked origin:', origin);
       return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
 app.use(express.json());
