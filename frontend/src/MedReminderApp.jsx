@@ -16,7 +16,9 @@ import {
 const STORAGE_KEY = 'medreminder_token';
 const REMINDERS_KEY = 'medreminder_reminders_enabled';
 const SOUND_KEY = 'medreminder_reminder_sound';
-const API = axios.create({ baseURL: '/api' });
+const API = axios.create({
+  baseURL: `${import.meta.env.VITE_API_URL}/api`,
+});
 const FREQUENCY_OPTIONS = ['Once daily', 'Every day', 'Twice daily', 'Three times daily', 'Specific times', 'Weekly'];
 const TIMES_BY_FREQUENCY = { 'Once daily': 1, 'Every day': 1, 'Twice daily': 2, 'Three times daily': 3 };
 const DEFAULT_TIMES_BY_FREQUENCY = { 1: ['08:00'], 2: ['08:00', '20:00'], 3: ['08:00', '14:00', '20:00'] };
